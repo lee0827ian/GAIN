@@ -32,7 +32,12 @@ os.environ["SSL_CERT_FILE"] = _BUNDLE
 os.environ["REQUESTS_CA_BUNDLE"] = _BUNDLE
 certifi.where = lambda: _BUNDLE  # curl_cffi가 import 시점에 certifi.where()를 읽는 경우 대비
 
+import io  # noqa: E402
+import json  # noqa: E402
+
+import pandas as pd  # noqa: E402
 import yfinance as yf  # noqa: E402  — CA 설정 이후에 import해야 함
+from curl_cffi import requests as curl_requests  # noqa: E402  — urllib은 FRED에서 타임아웃
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -94,8 +99,92 @@ def judge(symbol, price):
     return "", ""
 
 
+def _get(url):
+    r = curl_requests.get(url, timeout=30, impersonate="chrome")  # FRED가 비브라우저 요청을 403 처리
+    r.raise_for_status()
+    return r.content
+
+
+def fred_series(sid, start="2024-01-01"):
+    """FRED fredgraph.csv — API 키 불필요."""
+    raw = _get(f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={sid}&cosd={start}")
+    df = pd.read_csv(io.BytesIO(raw))
+    df.columns = ["date", "value"]
+    df["value"] = pd.to_numeric(df["value"], errors="coerce")
+    return df.dropna().reset_index(drop=True)
+
+
+def stablecoin_total():
+    """DefiLlama — 스테이블코인 총 시총(단기채 수요 대리지표). 키 불필요."""
+    data = json.loads(_get("https://stablecoins.llama.fi/stablecoincharts/all"))
+    tot = lambda d: d["totalCirculating"]["peggedUSD"]  # noqa: E731
+    return tot(data[-1]), (tot(data[-1]) / tot(data[-31]) - 1) * 100
+
+
+def judge_mom(name, mom):
+    """물가 MoM 판독 — 프레임워크 L1-1."""
+    if mom < 0:
+        return "🟢", f"{name} 마이너스 — '더 벗을것도 없다', 인상 서사 소멸"
+    if mom <= 0.25:
+        return "🟢", "디스인플레 경로 유지 (JP모간 이상적 시나리오 0.20~0.25 이내)"
+    if mom <= 0.35:
+        return "🟡", "물가 반등 조짐 — 다음 지표까지 판단 보류"
+    return "🔴", "물가 재가속 — 인상 서사 부활, 판독 뒤집힘 트리거③"
+
+
+def fred_block():
+    print()
+    print("[L0/L1 거시 — FRED·DefiLlama]")
+    print(f"{'지표':<14}{'값':>12}  신호 코멘트")
+    print("-" * 78)
+    try:
+        cpi = fred_series("CPIAUCSL")
+        mom = (cpi["value"].iloc[-1] / cpi["value"].iloc[-2] - 1) * 100
+        sig, cmt = judge_mom("CPI", mom)
+        print(f"{'CPI MoM':<14}{mom:>+11.2f}%  {sig} {cmt} ({cpi['date'].iloc[-1]}분)")
+    except Exception as e:
+        print(f"{'CPI MoM':<14}{'조회 실패':>12}  ({type(e).__name__})")
+    try:
+        ppi = fred_series("PPIFIS")
+        mom = (ppi["value"].iloc[-1] / ppi["value"].iloc[-2] - 1) * 100
+        sig, cmt = judge_mom("PPI", mom)
+        print(f"{'PPI MoM':<14}{mom:>+11.2f}%  {sig} {cmt} ({ppi['date'].iloc[-1]}분)")
+    except Exception as e:
+        print(f"{'PPI MoM':<14}{'조회 실패':>12}  ({type(e).__name__})")
+    try:
+        dgs2 = fred_series("DGS2", "2026-01-01")
+        two = dgs2["value"].iloc[-1]
+        month_ago = dgs2["value"].iloc[-22] if len(dgs2) > 22 else dgs2["value"].iloc[0]
+        target = fred_series("DFEDTARU", "2026-01-01")["value"].iloc[-1]
+        gap = two - target
+        if gap > 0.10:
+            sig, cmt = "🔴", f"2년물이 기준금리+{gap:.2f}%p — 시장이 인상 프라이싱 중"
+        elif gap < -0.20:
+            sig, cmt = "🟢", f"2년물이 기준금리{gap:.2f}%p — 인하 프라이싱"
+        else:
+            sig, cmt = "🟢", "정책 기대 중립 — 인상 서사 미프라이싱"
+        print(f"{'미2Y(이 년)':<13}{two:>11.2f}%  {sig} {cmt} (1M {month_ago - two:+.2f}%p→)")
+        print(f"{'기준금리상단':<13}{target:>11.2f}%")
+    except Exception as e:
+        print(f"{'미2Y/기준금리':<13}{'조회 실패':>12}  ({type(e).__name__})")
+    try:
+        curve = fred_series("T10Y2Y", "2026-01-01")["value"].iloc[-1]
+        print(f"{'2s10s 커브':<13}{curve:>+10.2f}%p  {'🟢' if curve > 0 else '🟡'} {'정상화' if curve > 0 else '역전 — 플래트닝 감시'}")
+    except Exception as e:
+        print(f"{'2s10s 커브':<13}{'조회 실패':>12}  ({type(e).__name__})")
+    try:
+        mcap, chg30 = stablecoin_total()
+        sig = "🟢" if chg30 > 0 else "🟡"
+        print(f"{'스테이블 시총':<13}{mcap / 1e9:>10.0f}B$  {sig} 30일 {chg30:+.1f}% — L0 단기채 쉬프트 {'진행' if chg30 > 0 else '정체'}")
+    except Exception as e:
+        print(f"{'스테이블 시총':<13}{'조회 실패':>12}  ({type(e).__name__})")
+
+
 def main():
     print("고노고 신호등 — 프레임워크 v0.2 실시간 판독")
+    fred_block()
+    print()
+    print("[시장 실시간 — yfinance]")
     print(f"{'지표':<12}{'현재가':>14}{'전일比':>9}  신호 코멘트")
     print("-" * 78)
     for symbol, name in TICKERS.items():
