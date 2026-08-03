@@ -163,7 +163,7 @@ def fred_block():
             sig, cmt = "🟢", f"2년물이 기준금리{gap:.2f}%p — 인하 프라이싱"
         else:
             sig, cmt = "🟢", "정책 기대 중립 — 인상 서사 미프라이싱"
-        print(f"{'미2Y(이 년)':<13}{two:>11.2f}%  {sig} {cmt} (1M {month_ago - two:+.2f}%p→)")
+        print(f"{'미 2년물(2Y)':<13}{two:>11.2f}%  {sig} {cmt} (1M {month_ago - two:+.2f}%p→)")
         print(f"{'기준금리상단':<13}{target:>11.2f}%")
     except Exception as e:
         print(f"{'미2Y/기준금리':<13}{'조회 실패':>12}  ({type(e).__name__})")
